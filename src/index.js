@@ -5,7 +5,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import express from 'express';
 import { randomUUID } from 'crypto';
 import OAuthClient from 'intuit-oauth';
-import { getOAuthClient, loadTokens, saveTokens, isAuthenticated, ensureValidToken } from './auth.js';
+import { getOAuthClient, loadTokens, saveTokens, isAuthenticated, ensureValidToken, getTokenData } from './auth.js';
 import { tools, toolMap } from './tools.js';
 import {
   registerClient,
@@ -73,6 +73,73 @@ app.get('/auth-status', (req, res) => {
       ? 'Server is authenticated with QuickBooks Online.'
       : 'Not authenticated. Visit /auth to connect.',
   });
+});
+
+// ── Token display for Railway env var setup ──
+app.get('/save-tokens', (req, res) => {
+  const tokens = getTokenData();
+  if (!tokens) {
+    res.status(404).send(`
+      <html><body style="font-family:sans-serif;max-width:600px;margin:60px auto;padding:0 20px">
+        <h1>No Tokens Available</h1>
+        <p>Complete the <a href="/auth">QuickBooks OAuth flow</a> first.</p>
+      </body></html>
+    `);
+    return;
+  }
+
+  res.send(`
+    <html>
+    <head>
+      <title>QBO Tokens — Copy to Railway</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; color: #333; }
+        h1 { font-size: 22px; }
+        p { color: #666; font-size: 14px; }
+        .var { margin: 16px 0; }
+        .var label { display: block; font-weight: 600; font-size: 13px; color: #555; margin-bottom: 4px; }
+        .var input { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 13px; box-sizing: border-box; background: #f9f9f9; }
+        .warn { background: #fff3cd; border: 1px solid #ffc107; border-radius: 6px; padding: 12px 16px; margin: 20px 0; font-size: 13px; }
+        button { padding: 6px 14px; background: #0066cc; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; margin-top: 4px; }
+        button:hover { background: #0052a3; }
+        .ts { color: #999; font-size: 12px; margin-top: 4px; }
+      </style>
+    </head>
+    <body>
+      <h1>QuickBooks Token Values</h1>
+      <p>Copy these into your Railway project's <strong>Variables</strong> tab to persist tokens across deploys.</p>
+      <div class="warn">These are sensitive credentials. Do not share them or commit them to source control.</div>
+
+      <div class="var">
+        <label>QB_ACCESS_TOKEN</label>
+        <input type="text" value="${tokens.access_token}" readonly onclick="this.select()">
+        <button onclick="navigator.clipboard.writeText(this.previousElementSibling.value)">Copy</button>
+      </div>
+
+      <div class="var">
+        <label>QB_REFRESH_TOKEN</label>
+        <input type="text" value="${tokens.refresh_token}" readonly onclick="this.select()">
+        <button onclick="navigator.clipboard.writeText(this.previousElementSibling.value)">Copy</button>
+      </div>
+
+      <div class="var">
+        <label>QB_REALM_ID</label>
+        <input type="text" value="${tokens.realmId}" readonly onclick="this.select()">
+        <button onclick="navigator.clipboard.writeText(this.previousElementSibling.value)">Copy</button>
+      </div>
+
+      <div class="var">
+        <label>QB_TOKEN_CREATED_AT</label>
+        <input type="text" value="${tokens.created_at}" readonly onclick="this.select()">
+        <button onclick="navigator.clipboard.writeText(this.previousElementSibling.value)">Copy</button>
+        <div class="ts">Created: ${new Date(tokens.created_at).toISOString()}</div>
+      </div>
+
+      <p style="margin-top:24px">After pasting into Railway, the next deploy will pick them up automatically. Tokens auto-refresh in memory — revisit this page after a refresh to get updated values.</p>
+    </body>
+    </html>
+  `);
 });
 
 // ══════════════════════════════════════════════════════════════════
@@ -340,8 +407,6 @@ const PORT = process.env.PORT || 3000;
 
 // Load saved tokens on startup
 if (loadTokens()) {
-  console.log('Loaded saved tokens from tokens.json');
-  // Try a token refresh on startup to validate
   ensureValidToken()
     .then(() => console.log('Token validated successfully'))
     .catch((err) => console.log('Saved token needs re-auth:', err.message));
