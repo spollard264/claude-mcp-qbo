@@ -19,9 +19,17 @@ Copy `.env.example` to `.env` and fill in:
 QB_CLIENT_ID=your_client_id
 QB_CLIENT_SECRET=your_client_secret
 QB_REDIRECT_URI=http://localhost:3000/callback
-QB_ENVIRONMENT=production
+MCP_API_KEY=your-strong-api-key-here
 PORT=3000
 ```
+
+Generate a strong API key:
+
+```bash
+node -e "console.log(crypto.randomUUID()+'-'+crypto.randomUUID())"
+```
+
+The `MCP_API_KEY` protects the `/mcp` endpoint. Every team member connecting via Claude must include this key. If omitted, the `/mcp` endpoint is open (useful for local dev only).
 
 ### 3. Install and Run
 
@@ -48,7 +56,7 @@ Check status: `http://localhost:3000/auth-status`
    - `QB_CLIENT_ID`
    - `QB_CLIENT_SECRET`
    - `QB_REDIRECT_URI` (set to `https://your-domain.up.railway.app/callback`)
-   - `QB_ENVIRONMENT` = `production`
+   - `MCP_API_KEY` (generate a strong key — share it with your team)
 5. Deploy — Railway will use the Dockerfile automatically
 6. Visit `https://your-domain.up.railway.app/auth` to complete OAuth
 
@@ -56,20 +64,23 @@ Check status: `http://localhost:3000/auth-status`
 
 ## Connect to Claude
 
-In Claude.ai settings (or `claude_desktop_config.json`), add the MCP server:
+In Claude.ai settings (or `claude_desktop_config.json`), add the MCP server with your API key in the `Authorization` header:
 
 ```json
 {
   "mcpServers": {
     "quickbooks": {
       "type": "streamable-http",
-      "url": "https://your-domain.up.railway.app/mcp"
+      "url": "https://your-domain.up.railway.app/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_MCP_API_KEY"
+      }
     }
   }
 }
 ```
 
-For local development:
+For local development (no API key required if `MCP_API_KEY` is not set in `.env`):
 
 ```json
 {
@@ -81,6 +92,8 @@ For local development:
   }
 }
 ```
+
+Each team member uses the same `MCP_API_KEY` value in their own Claude config. The key authenticates access to the MCP endpoint — all users share the same QuickBooks connection.
 
 ## Available Tools
 

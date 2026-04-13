@@ -62,6 +62,21 @@ app.get('/auth-status', (req, res) => {
   });
 });
 
+// ── API key auth middleware for /mcp ──
+function requireApiKey(req, res, next) {
+  const apiKey = process.env.MCP_API_KEY;
+  if (!apiKey) {
+    // No key configured — allow all requests (dev mode)
+    return next();
+  }
+  const authHeader = req.headers['authorization'];
+  if (!authHeader || authHeader !== `Bearer ${apiKey}`) {
+    res.status(401).json({ error: 'Unauthorized - valid API key required' });
+    return;
+  }
+  next();
+}
+
 // ── MCP Server setup ──
 
 // Track transports per session for cleanup
@@ -101,7 +116,7 @@ function createMcpServer() {
 }
 
 // Streamable HTTP endpoint for MCP
-app.all('/mcp', async (req, res) => {
+app.all('/mcp', requireApiKey, async (req, res) => {
   // Handle GET for SSE stream (session resumption)
   // Handle POST for JSON-RPC messages
   // Handle DELETE for session termination
