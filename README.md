@@ -29,7 +29,7 @@ Generate a strong API key:
 node -e "console.log(crypto.randomUUID()+'-'+crypto.randomUUID())"
 ```
 
-The `MCP_API_KEY` protects the `/mcp` endpoint. Every team member connecting via Claude must include this key. If omitted, the `/mcp` endpoint is open (useful for local dev only).
+The `MCP_API_KEY` protects the `/mcp` endpoint. It is used as the shared secret during the OAuth authorization flow that Claude.ai performs automatically. If omitted, the `/mcp` endpoint is open (useful for local dev only).
 
 ### 3. Install and Run
 
@@ -64,7 +64,26 @@ Check status: `http://localhost:3000/auth-status`
 
 ## Connect to Claude
 
-In Claude.ai settings (or `claude_desktop_config.json`), add the MCP server with your API key in the `Authorization` header:
+### Claude.ai (Web)
+
+Add your MCP server URL in Claude.ai's MCP settings:
+
+```
+https://your-domain.up.railway.app/mcp
+```
+
+When you connect, Claude.ai will automatically:
+1. Discover the OAuth endpoints via `/.well-known/oauth-authorization-server`
+2. Register a client via `POST /register`
+3. Open a browser window to `/authorize` where you enter your `MCP_API_KEY`
+4. Exchange the authorization code for an access token
+5. Use the token for all subsequent `/mcp` requests
+
+Each team member goes through this flow once. They all enter the same `MCP_API_KEY` value.
+
+### Claude Desktop / Claude Code
+
+In `claude_desktop_config.json`, add:
 
 ```json
 {
@@ -80,7 +99,11 @@ In Claude.ai settings (or `claude_desktop_config.json`), add the MCP server with
 }
 ```
 
-For local development (no API key required if `MCP_API_KEY` is not set in `.env`):
+Claude Desktop and Claude Code support passing the key directly via headers, bypassing the OAuth flow.
+
+### Local Development
+
+If `MCP_API_KEY` is not set in `.env`, no auth is required:
 
 ```json
 {
@@ -92,8 +115,6 @@ For local development (no API key required if `MCP_API_KEY` is not set in `.env`
   }
 }
 ```
-
-Each team member uses the same `MCP_API_KEY` value in their own Claude config. The key authenticates access to the MCP endpoint — all users share the same QuickBooks connection.
 
 ## Available Tools
 

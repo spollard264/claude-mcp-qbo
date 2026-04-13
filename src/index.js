@@ -3,18 +3,30 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import express from 'express';
 import { randomUUID } from 'crypto';
+import OAuthClient from 'intuit-oauth';
 import { getOAuthClient, loadTokens, saveTokens, isAuthenticated, ensureValidToken } from './auth.js';
 import { tools } from './tools.js';
+import {
+  registerClient,
+  validateAuthRequest,
+  createAuthCode,
+  exchangeCodeForToken,
+  validateBearerToken,
+  getServerUrl,
+  buildProtectedResourceMetadata,
+  buildAuthServerMetadata,
+} from './mcp-auth.js';
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // ── Health check ──
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', authenticated: isAuthenticated() });
 });
 
-// ── OAuth routes ──
+// ── QuickBooks OAuth routes (for connecting to QBO) ──
 app.get('/auth', (req, res) => {
   const client = getOAuthClient();
   const authUri = client.authorizeUri({
@@ -62,19 +74,166 @@ app.get('/auth-status', (req, res) => {
   });
 });
 
-// ── API key auth middleware for /mcp ──
-function requireApiKey(req, res, next) {
+// ══════════════════════════════════════════════════════════════════
+// MCP OAuth 2.1 Authorization Server (for Claude.ai to auth with us)
+// ══════════════════════════════════════════════════════════════════
+
+// ── Protected Resource Metadata (RFC 9728) ──
+app.get('/.well-known/oauth-protected-resource', (req, res) => {
+  const serverUrl = getServerUrl(req);
+  res.json(buildProtectedResourceMetadata(serverUrl));
+});
+
+app.get('/.well-known/oauth-protected-resource/mcp', (req, res) => {
+  const serverUrl = getServerUrl(req);
+  res.json(buildProtectedResourceMetadata(serverUrl));
+});
+
+// ── Authorization Server Metadata (RFC 8414) ──
+app.get('/.well-known/oauth-authorization-server', (req, res) => {
+  const serverUrl = getServerUrl(req);
+  res.json(buildAuthServerMetadata(serverUrl));
+});
+
+// ── Dynamic Client Registration (RFC 7591) ──
+app.post('/register', (req, res) => {
+  const result = registerClient(req.body || {});
+  res.status(201).json(result);
+});
+
+// ── Authorization Endpoint ──
+app.get('/authorize', (req, res) => {
+  const validationError = validateAuthRequest(req.query);
+  if (validationError) {
+    res.status(400).json(validationError);
+    return;
+  }
+
+  const { client_id, redirect_uri, code_challenge, state, scope } = req.query;
+
+  // Show a simple login page where the user enters their MCP_API_KEY
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Authorize MCP Access</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }
+        .card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 420px; width: 100%; }
+        h1 { margin: 0 0 8px 0; font-size: 22px; }
+        p { color: #666; margin: 0 0 24px 0; font-size: 14px; }
+        label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 14px; }
+        input[type=password] { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 15px; box-sizing: border-box; }
+        input[type=password]:focus { outline: none; border-color: #0066cc; box-shadow: 0 0 0 3px rgba(0,102,204,0.15); }
+        button { width: 100%; padding: 12px; background: #0066cc; color: white; border: none; border-radius: 6px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 16px; }
+        button:hover { background: #0052a3; }
+        .error { color: #cc0000; font-size: 13px; margin-top: 8px; display: none; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>Authorize MCP Access</h1>
+        <p>Enter your server API key to grant Claude access to QuickBooks Online.</p>
+        <form method="POST" action="/authorize">
+          <input type="hidden" name="client_id" value="${client_id}">
+          <input type="hidden" name="redirect_uri" value="${redirect_uri}">
+          <input type="hidden" name="code_challenge" value="${code_challenge}">
+          <input type="hidden" name="state" value="${state || ''}">
+          <input type="hidden" name="scope" value="${scope || 'mcp'}">
+          <label for="api_key">API Key</label>
+          <input type="password" id="api_key" name="api_key" placeholder="Enter MCP_API_KEY" required autofocus>
+          <div class="error" id="error"></div>
+          <button type="submit">Authorize</button>
+        </form>
+      </div>
+    </body>
+    </html>
+  `);
+});
+
+app.post('/authorize', (req, res) => {
+  const { client_id, redirect_uri, code_challenge, state, scope, api_key } = req.body;
+
+  // Validate the API key
+  const expectedKey = process.env.MCP_API_KEY;
+  if (!expectedKey) {
+    res.status(500).send('MCP_API_KEY is not configured on the server.');
+    return;
+  }
+  if (api_key !== expectedKey) {
+    // Re-show the form with an error
+    res.status(401).send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Authorize MCP Access</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }
+          .card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 420px; width: 100%; }
+          h1 { margin: 0 0 8px 0; font-size: 22px; }
+          p { color: #666; margin: 0 0 24px 0; font-size: 14px; }
+          label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 14px; }
+          input[type=password] { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 15px; box-sizing: border-box; }
+          button { width: 100%; padding: 12px; background: #0066cc; color: white; border: none; border-radius: 6px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 16px; }
+          .error { color: #cc0000; font-size: 13px; margin-top: 8px; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h1>Authorize MCP Access</h1>
+          <p>Enter your server API key to grant Claude access to QuickBooks Online.</p>
+          <form method="POST" action="/authorize">
+            <input type="hidden" name="client_id" value="${client_id}">
+            <input type="hidden" name="redirect_uri" value="${redirect_uri}">
+            <input type="hidden" name="code_challenge" value="${code_challenge}">
+            <input type="hidden" name="state" value="${state || ''}">
+            <input type="hidden" name="scope" value="${scope || 'mcp'}">
+            <label for="api_key">API Key</label>
+            <input type="password" id="api_key" name="api_key" placeholder="Enter MCP_API_KEY" required autofocus>
+            <div class="error">Invalid API key. Please try again.</div>
+            <button type="submit">Authorize</button>
+          </form>
+        </div>
+      </body>
+      </html>
+    `);
+    return;
+  }
+
+  // Key is valid — generate auth code and redirect back
+  const code = createAuthCode(client_id, redirect_uri, code_challenge, scope);
+  const redirectUrl = new URL(redirect_uri);
+  redirectUrl.searchParams.set('code', code);
+  if (state) redirectUrl.searchParams.set('state', state);
+  res.redirect(302, redirectUrl.toString());
+});
+
+// ── Token Endpoint ──
+app.post('/token', (req, res) => {
+  const result = exchangeCodeForToken(req.body);
+  if (result.error) {
+    res.status(400).json(result);
+    return;
+  }
+  res.json(result);
+});
+
+// ── MCP Bearer Token auth middleware ──
+function requireAuth(req, res, next) {
   const apiKey = process.env.MCP_API_KEY;
   if (!apiKey) {
     // No key configured — allow all requests (dev mode)
     return next();
   }
+
   const authHeader = req.headers['authorization'];
-  if (!authHeader || authHeader !== `Bearer ${apiKey}`) {
-    res.status(401).json({ error: 'Unauthorized - valid API key required' });
-    return;
+  if (validateBearerToken(authHeader)) {
+    return next();
   }
-  next();
+
+  res.status(401).json({ error: 'Unauthorized - valid API key required' });
 }
 
 // ── MCP Server setup ──
@@ -116,7 +275,7 @@ function createMcpServer() {
 }
 
 // Streamable HTTP endpoint for MCP
-app.all('/mcp', requireApiKey, async (req, res) => {
+app.all('/mcp', requireAuth, async (req, res) => {
   // Handle GET for SSE stream (session resumption)
   // Handle POST for JSON-RPC messages
   // Handle DELETE for session termination
@@ -167,9 +326,6 @@ app.all('/mcp', requireApiKey, async (req, res) => {
   await transport.handleRequest(req, res, req.body);
 });
 
-// ── Import OAuthClient scopes ──
-import OAuthClient from 'intuit-oauth';
-
 // ── Start server ──
 const PORT = process.env.PORT || 3000;
 
@@ -185,6 +341,6 @@ if (loadTokens()) {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`QBO MCP Server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`OAuth start:  http://localhost:${PORT}/auth`);
+  console.log(`QBO OAuth:    http://localhost:${PORT}/auth`);
   console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
 });
