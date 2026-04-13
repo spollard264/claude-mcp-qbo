@@ -10,7 +10,10 @@
       "Bash(node -e ':*)",
       "Bash(node -e \"import OAuthClient from 'intuit-oauth'; console.log\\('environment enum:', JSON.stringify\\(OAuthClient.environment\\)\\);\")",
       "Bash(npm ls:*)",
-      "Bash(node --check src/mcp-auth.js)"
+      "Bash(node --check src/mcp-auth.js)",
+      "Bash(node -e \"import pkg from '@modelcontextprotocol/sdk/package.json' with { type: 'json' }; console.log\\('MCP SDK version:', pkg.default.version\\);\")",
+      "Bash(npm view:*)",
+      "Bash(node test-mcp.mjs)"
     ]
   }
 }

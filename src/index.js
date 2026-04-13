@@ -1,11 +1,12 @@
 import 'dotenv/config';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
 import { randomUUID } from 'crypto';
 import OAuthClient from 'intuit-oauth';
 import { getOAuthClient, loadTokens, saveTokens, isAuthenticated, ensureValidToken } from './auth.js';
-import { tools } from './tools.js';
+import { tools, toolMap } from './tools.js';
 import {
   registerClient,
   validateAuthRequest,
@@ -242,88 +243,96 @@ function requireAuth(req, res, next) {
 const transports = new Map();
 
 function createMcpServer() {
-  const server = new McpServer({
-    name: 'quickbooks-online',
-    version: '1.0.0',
-  });
+  const server = new Server(
+    { name: 'quickbooks-online', version: '1.0.0' },
+    { capabilities: { tools: {} } },
+  );
 
-  // Register all tools
-  for (const t of tools) {
-    server.tool(
-      t.name,
-      t.description,
-      t.inputSchema,
-      async (args) => {
-        try {
-          // Ensure we have a valid token before any tool call
-          await ensureValidToken();
-          const result = await t.handler(args);
-          return {
-            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-          };
-        } catch (err) {
-          return {
-            content: [{ type: 'text', text: `Error: ${err.message}` }],
-            isError: true,
-          };
-        }
-      }
-    );
-  }
+  // tools/list — return all tool definitions as plain JSON Schema
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: tools.map(t => ({
+      name: t.name,
+      description: t.description,
+      inputSchema: t.inputSchema,
+    })),
+  }));
+
+  // tools/call — dispatch to the matching tool handler
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    const tool = toolMap.get(name);
+    if (!tool) {
+      return {
+        content: [{ type: 'text', text: `Error: Unknown tool "${name}"` }],
+        isError: true,
+      };
+    }
+    try {
+      await ensureValidToken();
+      const result = await tool.handler(args || {});
+      return {
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: `Error: ${err.message}` }],
+        isError: true,
+      };
+    }
+  });
 
   return server;
 }
 
 // Streamable HTTP endpoint for MCP
 app.all('/mcp', requireAuth, async (req, res) => {
-  // Handle GET for SSE stream (session resumption)
-  // Handle POST for JSON-RPC messages
-  // Handle DELETE for session termination
-  const sessionId = req.headers['mcp-session-id'];
+  try {
+    const sessionId = req.headers['mcp-session-id'];
 
-  if (req.method === 'GET' || req.method === 'DELETE') {
-    // For GET/DELETE, we need an existing session
-    if (!sessionId || !transports.has(sessionId)) {
-      res.status(400).json({ error: 'Invalid or missing session ID' });
+    if (req.method === 'GET' || req.method === 'DELETE') {
+      if (!sessionId || !transports.has(sessionId)) {
+        res.status(400).json({ error: 'Invalid or missing session ID' });
+        return;
+      }
+      const transport = transports.get(sessionId);
+      await transport.handleRequest(req, res);
       return;
     }
-    const transport = transports.get(sessionId);
-    await transport.handleRequest(req, res);
-    return;
-  }
 
-  // POST - could be new session (initialize) or existing session
-  if (sessionId && transports.has(sessionId)) {
-    // Existing session
-    const transport = transports.get(sessionId);
-    await transport.handleRequest(req, res, req.body);
-    return;
-  }
-
-  // New session - create transport and server
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-  });
-
-  const server = createMcpServer();
-
-  transport.onclose = () => {
-    const sid = transport.sessionId;
-    if (sid) {
-      transports.delete(sid);
-      console.log(`Session ${sid} closed`);
+    // POST — existing session
+    if (sessionId && transports.has(sessionId)) {
+      const transport = transports.get(sessionId);
+      await transport.handleRequest(req, res, req.body);
+      return;
     }
-  };
 
-  await server.connect(transport);
+    // POST — new session
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (sessionId) => {
+        transports.set(sessionId, transport);
+        console.log(`New MCP session: ${sessionId}`);
+      },
+    });
 
-  // Store transport after connect so sessionId is set
-  if (transport.sessionId) {
-    transports.set(transport.sessionId, transport);
-    console.log(`New MCP session: ${transport.sessionId}`);
+    const server = createMcpServer();
+
+    transport.onclose = () => {
+      const sid = transport.sessionId;
+      if (sid) {
+        transports.delete(sid);
+        console.log(`Session ${sid} closed`);
+      }
+    };
+
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (err) {
+    console.error('MCP endpoint error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Internal server error', message: err.message });
+    }
   }
-
-  await transport.handleRequest(req, res, req.body);
 });
 
 // ── Start server ──
