@@ -1,5 +1,8 @@
 import QuickBooks from 'node-quickbooks';
+import axios from 'axios';
 import { ensureValidToken } from './auth.js';
+
+const QBO_BASE_URL = 'https://quickbooks.api.intuit.com/v3/company';
 
 function getClient() {
   return ensureValidToken().then(({ accessToken, realmId }) => {
@@ -18,42 +21,83 @@ function getClient() {
   });
 }
 
-// Promisify a node-quickbooks callback method
+// Extract intuit_tid from axios response or node-quickbooks response
+function extractTid(res) {
+  if (!res) return undefined;
+  // axios response: res.headers is a plain object
+  // node-quickbooks passes the axios response as the 3rd callback arg
+  const headers = res.headers || res.header;
+  if (!headers) return undefined;
+  return headers['intuit_tid'] || headers['intuit-tid'] || undefined;
+}
+
+// Build an error with intuit_tid attached
+function buildError(err, res) {
+  const tid = extractTid(res);
+  const message = err?.Fault?.Error?.[0]?.Message
+    || err?.Fault?.Error?.[0]?.Detail
+    || err?.message
+    || JSON.stringify(err);
+  const tidSuffix = tid ? ` [intuit_tid: ${tid}]` : '';
+  console.error(`QBO API Error: ${message}${tidSuffix}`);
+  const error = new Error(`${message}${tidSuffix}`);
+  error.intuit_tid = tid;
+  return error;
+}
+
+// Promisify a node-quickbooks callback method, capturing intuit_tid
 function promisify(qbo, method, ...args) {
   return new Promise((resolve, reject) => {
-    qbo[method](...args, (err, result) => {
+    qbo[method](...args, (err, result, res) => {
       if (err) {
-        const message = err.Fault?.Error?.[0]?.Message
-          || err.Fault?.Error?.[0]?.Detail
-          || err.message
-          || JSON.stringify(err);
-        reject(new Error(message));
+        reject(buildError(err, res));
       } else {
+        const tid = extractTid(res);
+        if (tid && result && typeof result === 'object') {
+          result._intuit_tid = tid;
+        }
         resolve(result);
       }
     });
   });
 }
 
-// Generic query helper using QBO query language
+// Direct HTTP query against QBO API (node-quickbooks has no .query() method)
 async function query(queryString) {
-  const qbo = await getClient();
-  return new Promise((resolve, reject) => {
-    qbo.query(queryString, (err, result) => {
-      if (err) {
-        const message = err.Fault?.Error?.[0]?.Message
-          || err.Fault?.Error?.[0]?.Detail
-          || err.message
-          || JSON.stringify(err);
-        reject(new Error(message));
-      } else {
-        resolve(result);
-      }
+  const { accessToken, realmId } = await ensureValidToken();
+  const url = `${QBO_BASE_URL}/${realmId}/query`;
+  try {
+    const res = await axios.get(url, {
+      params: { query: queryString },
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Accept': 'application/json',
+        'Content-Type': 'application/text',
+      },
     });
-  });
+    const tid = extractTid(res);
+    const data = res.data;
+    if (tid && data && typeof data === 'object') {
+      data._intuit_tid = tid;
+    }
+    return data;
+  } catch (err) {
+    const res = err.response;
+    const tid = extractTid(res);
+    const body = res?.data;
+    const message = body?.Fault?.Error?.[0]?.Message
+      || body?.Fault?.Error?.[0]?.Detail
+      || err.message
+      || JSON.stringify(err);
+    const tidSuffix = tid ? ` [intuit_tid: ${tid}]` : '';
+    console.error(`QBO Query Error: ${message}${tidSuffix}`);
+    const error = new Error(`${message}${tidSuffix}`);
+    error.intuit_tid = tid;
+    throw error;
+  }
 }
 
-// Report helper using the QBO reporting API
+// Report helper — node-quickbooks report callbacks receive (err, body, res)
 async function getReport(reportType, params = {}) {
   const qbo = await getClient();
   return new Promise((resolve, reject) => {
@@ -62,14 +106,14 @@ async function getReport(reportType, params = {}) {
       reject(new Error(`Unknown report type: ${reportType}`));
       return;
     }
-    qbo[method](params, (err, result) => {
+    qbo[method](params, (err, result, res) => {
       if (err) {
-        const message = err.Fault?.Error?.[0]?.Message
-          || err.Fault?.Error?.[0]?.Detail
-          || err.message
-          || JSON.stringify(err);
-        reject(new Error(message));
+        reject(buildError(err, res));
       } else {
+        const tid = extractTid(res);
+        if (tid && result && typeof result === 'object') {
+          result._intuit_tid = tid;
+        }
         resolve(result);
       }
     });
@@ -91,7 +135,6 @@ export async function listInvoices(filters = {}) {
     conditions.push(`CustomerRef = '${filters.customer_id}'`);
   }
   if (filters.status) {
-    // QBO uses Balance for status filtering
     if (filters.status.toLowerCase() === 'paid') {
       conditions.push("Balance = '0'");
     } else if (filters.status.toLowerCase() === 'unpaid' || filters.status.toLowerCase() === 'open') {
@@ -126,11 +169,14 @@ export async function updateInvoice(invoiceData) {
 export async function sendInvoice(invoiceId, email) {
   const qbo = await getClient();
   return new Promise((resolve, reject) => {
-    qbo.sendInvoicePdf(invoiceId, email, (err, result) => {
+    qbo.sendInvoicePdf(invoiceId, email, (err, result, res) => {
       if (err) {
-        const message = err.Fault?.Error?.[0]?.Message || err.message || JSON.stringify(err);
-        reject(new Error(message));
+        reject(buildError(err, res));
       } else {
+        const tid = extractTid(res);
+        if (tid && result && typeof result === 'object') {
+          result._intuit_tid = tid;
+        }
         resolve(result);
       }
     });

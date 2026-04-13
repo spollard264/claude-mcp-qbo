@@ -8,7 +8,8 @@
       "Bash(node --check src/index.js)",
       "Bash(timeout 5 node src/index.js)",
       "Bash(node -e ':*)",
-      "Bash(node -e \"import OAuthClient from 'intuit-oauth'; console.log\\('environment enum:', JSON.stringify\\(OAuthClient.environment\\)\\);\")"
+      "Bash(node -e \"import OAuthClient from 'intuit-oauth'; console.log\\('environment enum:', JSON.stringify\\(OAuthClient.environment\\)\\);\")",
+      "Bash(npm ls:*)"
     ]
   }
 }

@@ -10,10 +10,11 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "axios": "^1.15.0",
+    "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "intuit-oauth": "^4.0.5",
-    "node-quickbooks": "^2.0.39",
-    "dotenv": "^16.4.7"
+    "node-quickbooks": "^2.0.39"
   },
   "engines": {
     "node": ">=20.0.0"
