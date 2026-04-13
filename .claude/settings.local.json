@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(node --check src/auth.js)",
+      "Bash(node --check src/qbo-client.js)",
+      "Bash(node --check src/tools.js)",
+      "Bash(node --check src/index.js)",
+      "Bash(timeout 5 node src/index.js)",
+      "Bash(node -e ':*)",
+      "Bash(node -e \"import OAuthClient from 'intuit-oauth'; console.log\\('environment enum:', JSON.stringify\\(OAuthClient.environment\\)\\);\")"
+    ]
+  }
+}
