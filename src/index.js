@@ -5,7 +5,11 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import express from 'express';
 import { randomUUID } from 'crypto';
 import OAuthClient from 'intuit-oauth';
-import { getOAuthClient, loadTokens, saveTokens, isAuthenticated, ensureValidToken, getTokenData } from './auth.js';
+import {
+  getOAuthClient, loadTokens, saveTokens, isAuthenticated, ensureValidToken,
+  getTokenData, getTokenMeta, refreshToken, startupHealthCheck,
+} from './auth.js';
+import { isRailwayConfigured } from './railway.js';
 import { tools, toolMap } from './tools.js';
 import {
   registerClient,
@@ -24,7 +28,15 @@ app.use(express.urlencoded({ extended: true }));
 
 // ── Health check ──
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', authenticated: isAuthenticated() });
+  const meta = getTokenMeta();
+  res.json({
+    status: isAuthenticated() ? 'ok' : 'unauthenticated',
+    authenticated: isAuthenticated(),
+    tokenAgeMinutes: meta?.tokenAgeMinutes ?? null,
+    lastRefresh: meta?.lastRefresh ?? null,
+    lastRefreshError: meta?.lastRefreshError ?? null,
+    railwayPersistence: meta?.railwayPersistence ?? 'not_configured',
+  });
 });
 
 // ── QuickBooks OAuth routes (for connecting to QBO) ──
@@ -140,6 +152,33 @@ app.get('/save-tokens', (req, res) => {
     </body>
     </html>
   `);
+});
+
+// ── Force token refresh (protected by MCP_API_KEY) ──
+app.post('/refresh-now', async (req, res) => {
+  const apiKey = process.env.MCP_API_KEY;
+  if (apiKey) {
+    const auth = req.headers['authorization'];
+    if (!auth || auth !== `Bearer ${apiKey}`) {
+      res.status(401).json({ error: 'Unauthorized - valid API key required' });
+      return;
+    }
+  }
+  try {
+    await refreshToken();
+    const meta = getTokenMeta();
+    res.json({
+      success: true,
+      message: 'Token refreshed and persisted successfully',
+      ...meta,
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message,
+      hint: 'If refresh fails, re-run OAuth via /auth',
+    });
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════
@@ -405,16 +444,31 @@ app.all('/mcp', requireAuth, async (req, res) => {
 // ── Start server ──
 const PORT = process.env.PORT || 3000;
 
-// Load saved tokens on startup
-if (loadTokens()) {
-  ensureValidToken()
-    .then(() => console.log('Token validated successfully'))
-    .catch((err) => console.log('Saved token needs re-auth:', err.message));
-}
-
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', async () => {
   console.log(`QBO MCP Server running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log(`Health:       http://localhost:${PORT}/health`);
   console.log(`QBO OAuth:    http://localhost:${PORT}/auth`);
+  console.log(`Refresh:      POST http://localhost:${PORT}/refresh-now`);
   console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
+  if (isRailwayConfigured()) {
+    console.log(`Railway API:  CONFIGURED`);
+    console.log(`  Project:     ${process.env.RAILWAY_PROJECT_ID}`);
+    console.log(`  Service:     ${process.env.RAILWAY_SERVICE_ID}`);
+    console.log(`  Environment: ${process.env.RAILWAY_ENVIRONMENT_ID}`);
+  } else {
+    console.log('Railway API:  not configured (tokens will not persist across deploys)');
+    if (!process.env.RAILWAY_API_TOKEN) console.log('  Missing: RAILWAY_API_TOKEN');
+    if (!process.env.RAILWAY_PROJECT_ID) console.log('  Missing: RAILWAY_PROJECT_ID (auto-injected by Railway)');
+    if (!process.env.RAILWAY_SERVICE_ID) console.log('  Missing: RAILWAY_SERVICE_ID (auto-injected by Railway)');
+    if (!process.env.RAILWAY_ENVIRONMENT_ID) console.log('  Missing: RAILWAY_ENVIRONMENT_ID (auto-injected by Railway)');
+  }
+
+  // Startup health check: load tokens, refresh, test QBO
+  const health = await startupHealthCheck();
+  if (health.error) {
+    console.error(`STARTUP WARNING: ${health.error}`);
+    console.error('Next steps: Visit /auth to re-authenticate, or POST /refresh-now to retry.');
+  } else if (health.qboTest) {
+    console.log('Startup health check passed: tokens loaded, refreshed, QBO API verified.');
+  }
 });

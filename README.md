@@ -167,8 +167,72 @@ If `MCP_API_KEY` is not set in `.env`, no auth is required:
 
 This server supports concurrent requests from multiple Claude users (2-5 people). All users share the same QuickBooks connection. Each MCP session gets its own transport instance for safe concurrent operation.
 
-## Token Lifecycle
+## Token Lifecycle & Persistence
 
-- **Access tokens** expire every 60 minutes and auto-refresh
-- **Refresh tokens** last 101 days — re-authenticate before they expire
-- Tokens persist in `tokens.json` between server restarts
+QBO tokens have two components:
+- **Access token** — expires every 60 minutes, auto-refreshes
+- **Refresh token** — valid for 100 days, **rotates on each refresh** (the old one is immediately invalidated)
+
+Because the refresh token rotates, it's critical that every refresh persists the new token durably. Otherwise a container restart loads the old (now-invalid) refresh token and the server is locked out.
+
+### How persistence works
+
+On every token refresh, the server writes the new tokens to three tiers:
+
+1. **`process.env`** — immediate, survives within the running process
+2. **Railway API** — durable, writes `QB_ACCESS_TOKEN`, `QB_REFRESH_TOKEN`, `QB_REALM_ID`, `QB_TOKEN_CREATED_AT` back to Railway env vars via the GraphQL API (requires `RAILWAY_API_TOKEN`)
+3. **`tokens.json`** — best-effort file write, works for local dev
+
+### Railway API setup
+
+1. Create an API token at [railway.com/account/tokens](https://railway.com/account/tokens)
+2. Add `RAILWAY_API_TOKEN` to your Railway service's env vars
+3. `RAILWAY_PROJECT_ID`, `RAILWAY_SERVICE_ID`, `RAILWAY_ENVIRONMENT_ID` are auto-injected by Railway
+
+With this configured, every token refresh automatically updates the Railway env vars. No manual copy-paste needed.
+
+### Startup health check
+
+On boot, the server:
+1. Loads tokens from env vars (or `tokens.json` fallback)
+2. Forces an immediate token refresh (gets a fresh access token, persists the rotated refresh token)
+3. Makes a test call to `GET /companyinfo/{realmId}` to verify the QBO connection works
+4. Logs a clear error if any step fails
+
+Check `/health` for current status:
+```json
+{
+  "status": "ok",
+  "authenticated": true,
+  "tokenAgeMinutes": 3,
+  "lastRefresh": "2026-04-16T12:00:00.000Z",
+  "lastRefreshError": null,
+  "railwayPersistence": "configured"
+}
+```
+
+## Troubleshooting Runbook
+
+### Server goes unauthenticated
+
+1. **Try `/refresh-now` first:**
+   ```bash
+   curl -X POST https://your-domain.up.railway.app/refresh-now \
+     -H "Authorization: Bearer YOUR_MCP_API_KEY"
+   ```
+   If this returns `"success": true`, you're back online — the token was refreshed and persisted.
+
+2. **If `/refresh-now` fails** with a token error, the refresh token has been invalidated (e.g., by another app using the same QBO OAuth credentials). Re-run the full OAuth flow:
+   - Visit `https://your-domain.up.railway.app/auth`
+   - Authorize with QuickBooks
+   - The new tokens are automatically persisted to Railway env vars
+
+3. **Check `/health`** to confirm: `"authenticated": true` and `"railwayPersistence": "configured"`.
+
+### Shared QBO OAuth app (e.g., Vercel dashboard)
+
+If another service (like a Vercel dashboard) uses the **same QBO OAuth app (same Client ID)**, their refresh tokens will conflict. When either side refreshes, it rotates the refresh token and invalidates the other's copy.
+
+**Options:**
+- **Separate OAuth apps** (recommended): Create a second app in the [Intuit Developer Dashboard](https://developer.intuit.com/app/developer/dashboard) so each service has its own token pair.
+- **Single source of truth**: Have only the MCP server do refreshes, and have the other service read tokens from the Railway env vars via Railway's API.
