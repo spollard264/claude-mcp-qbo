@@ -21,6 +21,7 @@ import {
   buildProtectedResourceMetadata,
   buildAuthServerMetadata,
 } from './mcp-auth.js';
+import { createDashboardRouter } from './dashboard-api.js';
 
 const app = express();
 app.use(express.json());
@@ -180,6 +181,13 @@ app.post('/refresh-now', async (req, res) => {
     });
   }
 });
+
+// ══════════════════════════════════════════════════════════════════
+// Dashboard JSON API (for harbinger-dashboard Vercel app)
+// Mounted at /api/* — separate key (DASHBOARD_API_KEY), CORS-locked,
+// 60s in-memory response cache. Does not touch /mcp or any other routes.
+// ══════════════════════════════════════════════════════════════════
+app.use('/api', createDashboardRouter());
 
 // ══════════════════════════════════════════════════════════════════
 // MCP OAuth 2.1 Authorization Server (for Claude.ai to auth with us)
