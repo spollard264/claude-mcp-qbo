@@ -235,6 +235,38 @@ export function createDashboardRouter() {
     }
   });
 
+  // ── GET /api/reports/ar-aging ──
+  // Summary AR aging ("AgedReceivables") as of a given date. Defaults to today.
+  // Query params: report_date (YYYY-MM-DD, optional, defaults to today UTC),
+  //               aging_method (default Report_Date),
+  //               days_per_period (default 30),
+  //               num_periods (default 4),
+  //               minorversion (default 75)
+  router.get('/reports/ar-aging', async (req, res) => {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const params = {
+        report_date: req.query.report_date || today,
+        aging_method: req.query.aging_method || 'Report_Date',
+        days_per_period: req.query.days_per_period || '30',
+        num_periods: req.query.num_periods || '4',
+        minorversion: req.query.minorversion || '75',
+      };
+      const cacheKey = `ar-aging:${JSON.stringify(params)}`;
+      const cached = cacheGet(cacheKey);
+      if (cached) {
+        res.setHeader('X-Cache', 'HIT');
+        return res.json(cached);
+      }
+      const data = await qboGet('/reports/AgedReceivables', params);
+      cacheSet(cacheKey, data);
+      res.setHeader('X-Cache', 'MISS');
+      res.json(data);
+    } catch (err) {
+      handleError('/api/reports/ar-aging', err, res);
+    }
+  });
+
   // ── GET /api/query — generic read-only SELECT passthrough ──
   // Escape hatch for future needs without a Railway redeploy.
   // Query params: query (SELECT ... — required), minorversion
